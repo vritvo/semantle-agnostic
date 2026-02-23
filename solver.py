@@ -95,12 +95,11 @@ class CrossModelSolver:
 
     _WORD_RE = re.compile(r'^[a-z]+$')
 
-    def __init__(self, semantle: Semantle, score_threshold: float = 0.85, halfspace_slack: float = 0.0, gap_threshold: float = 0.0):
+    def __init__(self, semantle: Semantle, score_threshold: float = 0.85, halfspace_slack: float = 0.0):
 
         self.semantle = semantle
         self.score_threshold = score_threshold  # keep candidates scoring >= this fraction of the max
         self.halfspace_slack = halfspace_slack  # a constraint counts as satisfied if score > -slack (0 = strict)
-        self.gap_threshold = gap_threshold  # only create constraints when |sim_i - sim_j| > this (0 = use all pairs)
 
         # game model — used only to look up guess vectors by name for constraint normals
         game_model = semantle.model
@@ -128,36 +127,32 @@ class CrossModelSolver:
         self.target_idx = self.word_to_idx.get(target)  # None if target not in st vocab
 
     def _update_candidates(self):
-        # Ordering comes from game model similarities, but constraint vectors come
-        # from sentence-transformer — so all dot products stay in the same vector space
+        # Only compare each guess to the best guess (highest similarity so far).
+        # This produces fewer, higher-quality constraints: "my best guess is closer
+        # to the target than X" is much more likely to be preserved across models
+        # than "this random word is slightly closer than that other random word."
         ordered = sorted(self.guesses, key=lambda x: -x[1])
-        sims = np.array([s for _, s in ordered])
-        word_vecs = np.array([self.vectors[self.word_to_idx[w]] for w, _ in ordered])
+        best_word, best_sim = ordered[0]
+        best_vec = self.vectors[self.word_to_idx[best_word]]
 
-        rows, cols = np.triu_indices(len(ordered), k=1)
+        # One constraint per non-best guess: best beats each other guess
+        other_words = ordered[1:]
+        other_vecs = np.array([self.vectors[self.word_to_idx[w]] for w, _ in other_words])
+        other_sims = np.array([s for _, s in other_words])
+        gaps = best_sim - other_sims  # how much better the best guess is
 
-        # Only keep pairs where the similarity gap is large enough that both models
-        # are likely to agree on the ordering — small gaps produce noisy constraints
-        if self.gap_threshold > 0:
-            gaps = sims[rows] - sims[cols]
-            keep = gaps > self.gap_threshold
-            rows, cols = rows[keep], cols[keep]
+        normals = best_vec - other_vecs  # (n_constraints, 384)
 
-        if len(rows) == 0:
-            return
-
-        normals = word_vecs[rows] - word_vecs[cols]  # (n_constraints, 384)
-
-        # Score candidates using sentence-transformer vectors — soft scoring because
-        # the two models disagree, so strict filtering would eliminate the true answer.
-        # halfspace_slack lets words slightly on the wrong side of a boundary still count.
+        # Weight each constraint by the similarity gap — large gaps are more reliable
         candidate_vecs = self.vectors[self.candidates]
-        scores = (normals @ candidate_vecs.T > -self.halfspace_slack).sum(axis=0)
+        satisfied = (normals @ candidate_vecs.T > -self.halfspace_slack)  # (n_constraints, n_cand)
+        scores = (gaps[:, None] * satisfied).sum(axis=0)
 
         # Keep candidates within score_threshold of the best score
         max_score = scores.max()
-        cutoff = int(max_score * self.score_threshold)
-        self.candidates = [idx for idx, s in zip(self.candidates, scores) if s >= cutoff]
+        if max_score > 0:
+            cutoff = max_score * self.score_threshold
+            self.candidates = [idx for idx, s in zip(self.candidates, scores) if s >= cutoff]
 
     def solve(self):
         print(f"Target: '{self.semantle.word_of_the_day}'")
