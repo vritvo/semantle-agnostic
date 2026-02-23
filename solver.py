@@ -2,6 +2,7 @@ import re
 import random
 import numpy as np
 import sys
+from sentence_transformers import SentenceTransformer
 from semantle.semantle import Semantle
 
 
@@ -94,11 +95,12 @@ class CrossModelSolver:
 
     _WORD_RE = re.compile(r'^[a-z]+$')
 
-    def __init__(self, semantle: Semantle, score_threshold: float = 0.85):
-        from sentence_transformers import SentenceTransformer
+    def __init__(self, semantle: Semantle, score_threshold: float = 0.85, halfspace_slack: float = 0.0, gap_threshold: float = 0.0):
 
         self.semantle = semantle
         self.score_threshold = score_threshold  # keep candidates scoring >= this fraction of the max
+        self.halfspace_slack = halfspace_slack  # a constraint counts as satisfied if score > -slack (0 = strict)
+        self.gap_threshold = gap_threshold  # only create constraints when |sim_i - sim_j| > this (0 = use all pairs)
 
         # game model — used only to look up guess vectors by name for constraint normals
         game_model = semantle.model
@@ -122,19 +124,35 @@ class CrossModelSolver:
         self.guesses: list[tuple[str, float]] = []
         self.candidates = list(range(len(self.vocab)))
 
+        target = semantle.word_of_the_day
+        self.target_idx = self.word_to_idx.get(target)  # None if target not in st vocab
+
     def _update_candidates(self):
         # Ordering comes from game model similarities, but constraint vectors come
         # from sentence-transformer — so all dot products stay in the same vector space
         ordered = sorted(self.guesses, key=lambda x: -x[1])
+        sims = np.array([s for _, s in ordered])
         word_vecs = np.array([self.vectors[self.word_to_idx[w]] for w, _ in ordered])
 
         rows, cols = np.triu_indices(len(ordered), k=1)
+
+        # Only keep pairs where the similarity gap is large enough that both models
+        # are likely to agree on the ordering — small gaps produce noisy constraints
+        if self.gap_threshold > 0:
+            gaps = sims[rows] - sims[cols]
+            keep = gaps > self.gap_threshold
+            rows, cols = rows[keep], cols[keep]
+
+        if len(rows) == 0:
+            return
+
         normals = word_vecs[rows] - word_vecs[cols]  # (n_constraints, 384)
 
         # Score candidates using sentence-transformer vectors — soft scoring because
-        # the two models disagree, so strict filtering would eliminate the true answer
+        # the two models disagree, so strict filtering would eliminate the true answer.
+        # halfspace_slack lets words slightly on the wrong side of a boundary still count.
         candidate_vecs = self.vectors[self.candidates]
-        scores = (normals @ candidate_vecs.T > 0).sum(axis=0)  # count of satisfied constraints
+        scores = (normals @ candidate_vecs.T > -self.halfspace_slack).sum(axis=0)
 
         # Keep candidates within score_threshold of the best score
         max_score = scores.max()
@@ -161,10 +179,13 @@ class CrossModelSolver:
 
             if len(self.guesses) >= 2:
                 before = len(self.candidates)
+                target_was_present = self.target_idx in self.candidates
                 self._update_candidates()
                 after = len(self.candidates)
+                target_now_present = self.target_idx in self.candidates
+                eliminated_marker = "  *** target eliminated ***" if target_was_present and not target_now_present else ""
                 print(f"Round {round_num:3d}: '{guess}' (sim={similarity:.4f})  "
-                      f"{before:>8,} -> {after:>8,} candidates")
+                      f"{before:>8,} -> {after:>8,} candidates{eliminated_marker}")
             else:
                 print(f"Round {round_num:3d}: '{guess}' (sim={similarity:.4f})  "
                       f"(need 2 guesses for constraints)")
