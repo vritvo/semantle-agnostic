@@ -28,11 +28,12 @@ class HalfspaceSolver:
         candidate_mask[self.candidates] = True
 
         # One normal vector per (i, j) pair where i ranked higher than j
+        # where "normal" is the vector perpendicular to the line connecting i and j.
         rows, cols = np.triu_indices(len(ordered), k=1)
-        normals = word_vecs[rows] - word_vecs[cols]  # (n_constraints, 300)
+        normals = word_vecs[rows] - word_vecs[cols]  # (n_constraints, d)
 
         # Score every candidate against every constraint simultaneously
-        candidate_vecs = self.vectors[candidate_mask]  # (n_cand, 300)
+        candidate_vecs = self.vectors[candidate_mask]  # (n_cand, d)
         scores = normals @ candidate_vecs.T            # (n_constraints, n_cand)
 
         # Keep only candidates that satisfy all constraints
