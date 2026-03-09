@@ -1,5 +1,5 @@
 [project]
-name = "semantle-halfspace"
+name = "semantle-agnostic"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
